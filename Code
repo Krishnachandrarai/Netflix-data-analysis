@@ -1,0 +1,318 @@
+# ==========================================
+# NETFLIX MOVIE PREDICTION PROJECT
+# ==========================================
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, StackingClassifier
+from sklearn.svm import LinearSVC
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report, confusion_matrix, ConfusionMatrixDisplay
+
+# ==========================================
+# STEP 1: LOAD AND INSPECT DATA
+# ==========================================
+
+data = pd.read_csv("C:/Users/kr360/Desktop/netflix_titles.csv")
+print("Dataset shape:", data.shape)
+print("Missing values:\n", data.isnull().sum())
+print("Duplicate rows:", data.duplicated().sum())
+
+# ==========================================
+# STEP 2: HANDLE MISSING VALUES
+# ==========================================
+
+data_clean = data.copy()
+for col in ["director", "cast", "country", "rating", "duration"]:
+    data_clean[col] = data_clean[col].fillna("Unknown")
+data_clean["date_added"] = pd.to_datetime(data_clean["date_added"], errors="coerce")
+
+# ==========================================
+# STEP 3: CHECK DATA CONSISTENCY
+# ==========================================
+
+print("Duplicate show IDs:", data_clean["show_id"].duplicated().sum())
+print("Duplicate titles:", data_clean["title"].duplicated().sum())
+print("Content distribution:\n", data_clean["type"].value_counts())
+print("Release year range:", data_clean["release_year"].min(), "-", data_clean["release_year"].max())
+
+# ==========================================
+# STEP 4: FILTER MOVIES
+# ==========================================
+
+movies = data_clean[data_clean["type"] == "Movie"].copy()
+print("Movie dataset shape:", movies.shape)
+
+# ==========================================
+# STEP 5: EXPLORATORY DATA ANALYSIS
+# ==========================================
+
+movies["release_year"].value_counts().sort_index().plot(figsize=(12, 5), marker="o")
+plt.title("Netflix Movies by Release Year")
+plt.xlabel("Release Year")
+plt.ylabel("Number of Movies")
+plt.tight_layout()
+plt.show()
+
+genre_counts = movies["listed_in"].str.split(", ").explode().value_counts().head(10)
+sns.barplot(x=genre_counts.values, y=genre_counts.index)
+plt.title("Top 10 Movie Categories")
+plt.xlabel("Number of Movies")
+plt.tight_layout()
+plt.show()
+
+country_counts = movies.loc[movies["country"] != "Unknown", "country"].str.split(", ").explode().value_counts().head(10)
+sns.barplot(x=country_counts.values, y=country_counts.index)
+plt.title("Top 10 Countries by Movie Count")
+plt.xlabel("Number of Movies")
+plt.tight_layout()
+plt.show()
+
+movie_duration = pd.to_numeric(movies["duration"].str.extract(r"(\d+)")[0], errors="coerce")
+sns.histplot(movie_duration.dropna(), bins=30, kde=True)
+plt.title("Movie Duration Distribution")
+plt.xlabel("Duration (Minutes)")
+plt.tight_layout()
+plt.show()
+
+print("Movie duration statistics:\n", movie_duration.describe())
+print("Top genres:\n", genre_counts)
+print("Top countries:\n", country_counts)
+
+# ==========================================
+# STEP 6: FEATURE ENGINEERING
+# ==========================================
+
+movies_fe = movies.copy()
+movies_fe["duration_minutes"] = pd.to_numeric(movies_fe["duration"].str.extract(r"(\d+)")[0], errors="coerce")
+movies_fe["release_decade"] = (movies_fe["release_year"] // 10) * 10
+movies_fe["added_year"] = movies_fe["date_added"].dt.year
+movies_fe["added_month"] = movies_fe["date_added"].dt.month
+movies_fe["genre_count"] = movies_fe["listed_in"].str.split(", ").str.len()
+movies_fe["country_count"] = movies_fe["country"].apply(lambda x: 0 if x == "Unknown" else len(x.split(", ")))
+movies_fe["cast_count"] = movies_fe["cast"].apply(lambda x: 0 if x == "Unknown" else len(x.split(", ")))
+
+# ==========================================
+# STEP 7: DEFINE TARGET VARIABLE
+# ==========================================
+
+model_data = movies_fe.dropna(subset=["release_year"]).copy()
+model_data["target"] = (model_data["release_year"] >= 2015).astype(int)
+
+print("Target distribution:\n", model_data["target"].value_counts())
+print("Target percentages:\n", (model_data["target"].value_counts(normalize=True) * 100).round(2))
+
+# Target 0 = released before 2015; 1 = released in 2015 or later.
+# This predicts release period, not actual movie success.
+
+# ==========================================
+# STEP 8: SELECT FEATURES
+# ==========================================
+
+feature_columns = ["duration_minutes", "added_year", "added_month", "genre_count", "country_count", "cast_count", "rating"]
+X = model_data[feature_columns].copy()
+y = model_data["target"].copy()
+
+# ==========================================
+# STEP 9: PREPROCESS FEATURES
+# ==========================================
+
+numeric_features = ["duration_minutes", "added_year", "added_month", "genre_count", "country_count", "cast_count"]
+categorical_features = ["rating"]
+
+numeric_transformer = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+categorical_transformer = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("encoder", OneHotEncoder(handle_unknown="ignore"))
+])
+
+preprocessor = ColumnTransformer([
+    ("num", numeric_transformer, numeric_features),
+    ("cat", categorical_transformer, categorical_features)
+])
+
+# ==========================================
+# STEP 10: TRAIN-TEST SPLIT
+# ==========================================
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.20, random_state=42, stratify=y
+)
+print("Training shape:", X_train.shape)
+print("Testing shape:", X_test.shape)
+
+# ==========================================
+# STEP 11: TRAIN FOUR BASE MODELS
+# ==========================================
+
+base_models = {
+    "Logistic Regression": LogisticRegression(max_iter=2000, random_state=42),
+    "Decision Tree": DecisionTreeClassifier(max_depth=10, random_state=42),
+    "Random Forest": RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1),
+    "Linear SVM": LinearSVC(max_iter=10000, random_state=42)
+}
+
+trained_models = {}
+for name, model in base_models.items():
+    pipeline = Pipeline([("preprocessor", preprocessor), ("classifier", model)])
+    pipeline.fit(X_train, y_train)
+    trained_models[name] = pipeline
+    print(name, "trained successfully")
+
+# ==========================================
+# STEP 12: STACKING ENSEMBLE
+# EXTRA TREES AS META-MODEL
+# ==========================================
+
+stacking_estimators = [
+    ("logistic_regression", Pipeline([
+        ("preprocessor", preprocessor),
+        ("classifier", LogisticRegression(max_iter=2000, random_state=42))
+    ])),
+    ("decision_tree", Pipeline([
+        ("preprocessor", preprocessor),
+        ("classifier", DecisionTreeClassifier(max_depth=10, random_state=42))
+    ])),
+    ("random_forest", Pipeline([
+        ("preprocessor", preprocessor),
+        ("classifier", RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=1))
+    ])),
+    ("linear_svm", Pipeline([
+        ("preprocessor", preprocessor),
+        ("classifier", LinearSVC(max_iter=10000, random_state=42))
+    ]))
+]
+
+stacking_model = StackingClassifier(
+    estimators=stacking_estimators,
+    final_estimator=ExtraTreesClassifier(n_estimators=200, random_state=42, n_jobs=1),
+    cv=5,
+    n_jobs=-1
+)
+stacking_model.fit(X_train, y_train)
+print("Stacking ensemble trained successfully")
+
+# ==========================================
+# STEP 13: EVALUATE ALL FIVE MODELS
+# ==========================================
+
+all_models = {**trained_models, "Stacking Ensemble": stacking_model}
+results = []
+
+for name, model in all_models.items():
+    y_pred = model.predict(X_test)
+    metrics = {
+        "Model": name,
+        "Accuracy": accuracy_score(y_test, y_pred),
+        "Precision": precision_score(y_test, y_pred, zero_division=0),
+        "Recall": recall_score(y_test, y_pred, zero_division=0),
+        "F1 Score": f1_score(y_test, y_pred, zero_division=0)
+    }
+    results.append(metrics)
+
+    print(f"\n{name}")
+    print(classification_report(
+        y_test, y_pred,
+        target_names=["Before 2015", "2015 or Later"],
+        zero_division=0
+    ))
+
+    ConfusionMatrixDisplay(
+        confusion_matrix=confusion_matrix(y_test, y_pred),
+        display_labels=["Before 2015", "2015 or Later"]
+    ).plot()
+    plt.title(f"Confusion Matrix - {name}")
+    plt.tight_layout()
+    plt.show()
+
+results_df = pd.DataFrame(results).sort_values("F1 Score", ascending=False)
+print("\nMODEL COMPARISON:\n", results_df.round(4).to_string(index=False))
+
+# ==========================================
+# STEP 14: HYPERPARAMETER TUNING
+# ==========================================
+
+rf_pipeline = Pipeline([
+    ("preprocessor", preprocessor),
+    ("classifier", RandomForestClassifier(random_state=42, n_jobs=1))
+])
+
+param_grid = {
+    "classifier__n_estimators": [100, 200],
+    "classifier__max_depth": [10, 20, None],
+    "classifier__min_samples_split": [2, 5],
+    "classifier__min_samples_leaf": [1, 2]
+}
+
+grid_search = GridSearchCV(
+    rf_pipeline, param_grid, scoring="f1_macro", cv=3,
+    n_jobs=-1, verbose=1
+)
+grid_search.fit(X_train, y_train)
+best_rf_model = grid_search.best_estimator_
+tuned_predictions = best_rf_model.predict(X_test)
+
+print("\nBest parameters:", grid_search.best_params_)
+print("Best CV macro F1:", round(grid_search.best_score_, 4))
+print("Tuned model accuracy:", round(accuracy_score(y_test, tuned_predictions), 4))
+print("Tuned model precision:", round(precision_score(y_test, tuned_predictions, zero_division=0), 4))
+print("Tuned model recall:", round(recall_score(y_test, tuned_predictions, zero_division=0), 4))
+print("Tuned model F1:", round(f1_score(y_test, tuned_predictions, zero_division=0), 4))
+print(classification_report(
+    y_test, tuned_predictions,
+    target_names=["Before 2015", "2015 or Later"],
+    zero_division=0
+))
+
+# ==========================================
+# STEP 15: FEATURE IMPORTANCE
+# ==========================================
+
+fitted_preprocessor = best_rf_model.named_steps["preprocessor"]
+rf_classifier = best_rf_model.named_steps["classifier"]
+
+importance_df = pd.DataFrame({
+    "Feature": fitted_preprocessor.get_feature_names_out(),
+    "Importance": rf_classifier.feature_importances_
+}).sort_values("Importance", ascending=False)
+
+print("\nTop 15 features:\n", importance_df.head(15).to_string(index=False))
+
+top_features = importance_df.head(15).sort_values("Importance")
+plt.figure(figsize=(10, 6))
+plt.barh(top_features["Feature"], top_features["Importance"])
+plt.title("Top 15 Feature Importances - Tuned Random Forest")
+plt.xlabel("Importance")
+plt.tight_layout()
+plt.show()
+
+# ==========================================
+# STEP 16: SAVE RESULTS
+# ==========================================
+
+output_folder = "C:/Users/kr360/Desktop/Netflix_Project_Results"
+os.makedirs(output_folder, exist_ok=True)
+
+results_df.to_csv(os.path.join(output_folder, "model_comparison.csv"), index=False)
+importance_df.to_csv(os.path.join(output_folder, "feature_importance.csv"), index=False)
+
+pd.DataFrame({
+    "Actual_Target": y_test.to_numpy(),
+    "Predicted_Target": tuned_predictions
+}).to_csv(os.path.join(output_folder, "tuned_rf_predictions.csv"), index=False)
+
+print("\nResults saved to:", output_folder)
+print("Files: model_comparison.csv, feature_importance.csv, tuned_rf_predictions.csv")
